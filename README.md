@@ -7,14 +7,14 @@
 
 ---
 
-## 公开审计报告
+## 公开审计报告 · Public Audit Reports
 
-| 日期 | 项目 | 类型 | 结论 | 报告 |
+| 日期 | 项目 | 类型 | 结论 | 报告 / Report |
 |---|---|---|---|---|
-| 2026-06 | Twyne Contracts v1 | 杠杆借贷(Euler EVC/EVK) | 0 Crit/High/Med · 2 Low · 5 Info,对抗性验证排除 6 个攻击面 | [报告](./2026/Twyne-Contracts-v1-审计报告.md) |
-| 2026-06 | Silo Finance V3 (silo-core) | 隔离市场借贷 | 0 Crit/High/Med · 2 Low · 2 Info,对抗性验证排除 7 个候选 | [报告](./2026/Silo-V3-审计报告.md) |
+| 2026-06 | Twyne Contracts v1 | 杠杆借贷(Euler EVC/EVK) | 0 Crit/High/Med · 2 Low · 5 Info,对抗性验证排除 6 个攻击面 | [中文](./2026/Twyne-Contracts-v1-审计报告.md) · [English](./2026/Twyne-Contracts-v1-Audit-EN.md) |
+| 2026-06 | Silo Finance V3 (silo-core) | 隔离市场借贷 | 0 Crit/High/Med · 2 Low · 2 Info,对抗性验证排除 7 个候选 | [中文](./2026/Silo-V3-审计报告.md) · [English](./2026/Silo-V3-Audit-EN.md) |
 
-## 公开链上调查
+## 公开链上调查 · On-chain Investigations
 
 | 日期 | 标的 | 结论 |
 |---|---|---|
@@ -22,15 +22,16 @@
 
 ---
 
-## 我们怎么做审计
+## 我们怎么做审计 · How We Audit
 
-- **对抗性验证**:每个候选漏洞要么 PoC 坐实、要么读真实代码证伪。报告里有专门的"对抗性验证与排除"章节 —— 公开记录我们验证了哪些攻击、为什么排除,而不是只给一句"未发现问题"。
-- **公开可验证**:报告公开,每条发现绑定代码位置 + 影响 + 修复建议(可附 PoC / fuzz)。
-- **如实定级**:成熟、被反复审过的协议常常就是 0 高危 —— 我们如实写,不为凑数编造发现,也不用全 0 盖章走过场。
+- **对抗性验证 / Adversarial verification**:每个候选漏洞要么 PoC 坐实、要么读真实代码证伪。报告里有专门的"对抗性验证与排除"章节 —— 公开记录我们验证了哪些攻击、为什么排除,而不是只给一句"未发现问题"。
+- **公开可验证 / Public & verifiable**:报告公开,每条发现绑定代码位置 + 影响 + 修复建议(可附 PoC / fuzz)。
+- **如实定级 / Honest severity**:成熟、被反复审过的协议常常就是 0 高危 —— 我们如实写,不为凑数编造发现,也不用全 0 盖章走过场。
 
-## 联系 / 委托
+## 联系 / 委托 · Contact
 
-- Telegram:[@dsa885](https://t.me/dsa885)(优先)
+- Telegram:[@dsa885](https://t.me/dsa885)(优先 / preferred)
 - 𝕏:[@hunterweb303](https://x.com/hunterweb303)
 
 发我们代码仓库 / 合约地址 + 范围,24 小时内回报价与排期。
+Send us your repo / contract address + scope; we reply with a quote and timeline within 24h.
