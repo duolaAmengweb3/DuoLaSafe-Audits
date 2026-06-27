@@ -104,6 +104,84 @@
 
 ---
 
+## PoC(可运行复现)
+
+> 工程:`/tmp/duolasafe-audits/PoC/aztec/`(`foundry.toml` solc=0.8.24 + `test/Aztec.t.sol`,不依赖 forge-std)。
+> 运行:`export PATH="$HOME/.foundry/bin:$PATH"; cd /tmp/duolasafe-audits/PoC/aztec && forge test -vv`
+
+本 PoC 用最小可运行模型忠实复现根因因果链(§2):**escapeHatch 缺访问控制 + 证明不绑定资金归属 → 任意地址凭一份自填证明单笔抽空桥内储备**。这是对漏洞机制的还原(不是真实 ZK 电路 / TurboVerifier 的逐字节重放)。
+
+### 脆弱合约核心(忠实复现根因)
+
+```solidity
+// 模拟"验证器":真实事件中 rollupSize=0 的逃生证明被无条件接受,
+// 这里以"证明非空即通过"还原其"只看形式、不绑定归属"的本质。
+function _verifyProof(bytes calldata proof) internal pure returns (bool) {
+    return proof.length > 0; // 唯一门槛:证明非空 —— 内容/归属完全自填
+}
+
+// 紧急取款:缺访问控制 + 证明不绑定资金归属
+function escapeHatch(bytes calldata proof, address to, uint256 amount) external {
+    // (1) 无访问控制:没有 onlyOwner / provider / 签名校验
+    // (2) 仅"验证"证明非空,且 to/amount 与 proof 无任何绑定
+    require(_verifyProof(proof), "invalid proof");
+
+    // (3) 证明一过即放款:ETH + 代币按调用者自填的 to 直接转出
+    uint256 ethBal = address(this).balance;
+    if (ethBal > 0) { (bool ok,) = to.call{value: ethBal}(""); require(ok); }
+    uint256 tokenBal = token.balanceOf(address(this));
+    if (tokenBal > 0) { token.transfer(to, tokenBal); }
+}
+```
+
+攻击:`attacker` 用任意非空伪造证明 `hex"deadbeef"`(不绑定任何真实存款)、`to = 自己` 调用 `escapeHatch`,把桥内 1,158 ETH + 150,000 DAI(对照事件规模)一次性提走。
+
+### 修复版对照(两道独立防线,任一即挡)
+
+```solidity
+function escapeHatch(bytes calldata proof, address to, uint256 amount) external {
+    // 防线 A:访问控制 —— 非 owner 直接 revert
+    require(msg.sender == owner, "FIXED: only owner");
+
+    // 防线 B:证明必须绑定真实归属,且收款人=真实存款人、额度不超真实存款
+    bytes32 proofHash = keccak256(proof);
+    Claim storage c = claims[proofHash];
+    require(c.depositOwner != address(0), "FIXED: proof not bound to any deposit");
+    require(!c.used, "FIXED: claim already used");
+    require(to == c.depositOwner, "FIXED: to must equal real deposit owner");
+    require(amount <= c.amount, "FIXED: amount exceeds real deposit");
+    c.used = true;
+    (bool ok,) = to.call{value: amount}(""); require(ok);
+}
+```
+
+### 测试输出(PASS)
+
+```
+$ export PATH="$HOME/.foundry/bin:$PATH"; cd /tmp/duolasafe-audits/PoC/aztec && forge test -vv
+Compiling 1 files with Solc 0.8.24
+Solc 0.8.24 finished in 176.54ms
+Compiler run successful!
+
+Ran 4 tests for test/Aztec.t.sol:AztecPoC
+[PASS] testExploitDrainsVulnerableProcessor() (gas: 1120493)
+[PASS] testFixedAllowsLegitimateBoundClaim() (gas: 1284536)
+[PASS] testFixedRejectsUnauthorizedCaller() (gas: 1426652)
+[PASS] testFixedRejectsUnboundProof() (gas: 1179232)
+Suite result: ok. 4 passed; 0 failed; 0 skipped
+```
+
+### 解释(每条断言对应哪一根因)
+
+- **`testExploitDrainsVulnerableProcessor`** — 复现 §2①②③④:任意外部地址用伪造、不绑定归属的证明调用 `escapeHatch`,断言桥内 ETH 与代币储备 **被清零、全部落入 attacker**。对应真实事件"一份自填证明取走别人的钱"。
+- **`testFixedRejectsUnauthorizedCaller`** — 防线 A:同样的伪造证明,但 attacker(非 owner)调用 **revert**(`FIXED: only owner`),资金原封未动。
+- **`testFixedRejectsUnboundProof`** — 防线 B:即便 owner 亲自调用,只要证明未通过真实存款流程绑定归属,也 **revert**(`proof not bound to any deposit`)—— 堵住"outputOwner 任意指定"。
+- **`testFixedAllowsLegitimateBoundClaim`** — 正常路径:绑定到真实存款人的证明,owner 按真实归属放款成功;且同一证明已 `used`,无法重放或改发他人,验证"证明—归属"强绑定不误伤合法用户。
+
+> 忠实性说明:PoC 在合约逻辑层面忠实复现"无访问控制 + 证明不绑定资金归属 + 证明过即放款"的根因与修复对照;**不复刻** TurboVerifier 的真实 ZK 验证电路与 `rollupSize=0` 的字节级证明构造(该部分属 SlowMist/BlockSec 分析,本报告 §2 已标注"未链上逐字节复核")。本 PoC 还原的是漏洞的**授权与归属语义**,而非密码学证明本身。
+
+---
+
 ## 来源
 
 - TronWeekly:《Aztec Network Exploit: $2.16M Drained From Deprecated Bridge》 https://www.tronweekly.com/aztec-network-exploit-2-16m-drained-from/

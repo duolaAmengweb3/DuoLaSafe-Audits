@@ -140,6 +140,69 @@ MIP-X43 的目的是为 Base 与 Optimism 核心市场启用 **Chainlink OEV wra
 - gncrypto.news：Moonwell hit with 1.78 million bad debt after cbETH oracle glitch — https://www.gncrypto.news/news/moonwell-oracle-error-cbeth-misprice-leaves-18m-bad-debt/
 - Cryptonomist：Moonwell recovery: $2.68M cbETH compensation & governance — https://en.cryptonomist.ch/2026/02/19/moonwell-recovery-cbeth-compensation/
 
+## PoC(可运行复现)
+
+> 独立 Foundry 工程:`/tmp/duolasafe-audits/PoC/moonwell/`(`foundry.toml` solc=0.8.24 + `test/Moonwell.t.sol`)。
+> 运行:`export PATH="$HOME/.foundry/bin:$PATH"; cd /tmp/duolasafe-audits/PoC/moonwell && forge test -vv`
+> 不依赖 forge-std,纯 `external` 测试函数 + `require` 断言。本 PoC 复现的是**根因逻辑**(漏掉一段价格组合),非链上真实交易(公开来源未披露可复核地址/哈希,故不臆造)。
+
+### 复现什么
+
+| | 公式 | cbETH/ETH≈1.06、ETH/USD≈$2200 时 |
+|---|---|---|
+| 正确复合预言机 | `price = cbETHperETH * ethUsd / 1e18` | **$2332** |
+| 漏配版(MIP-X43 bug) | `buggyPrice = cbETHperETH`(漏乘 ethUsd) | **$1.06** |
+| 差距 | — | **≈2200×**(差三个数量级) |
+
+最后用一个极简借贷市场演示:漏配价下,健康头寸被错判为"严重不足额",attacker 偿还约 **$1.06** 即夺走 **1 整枚 cbETH**(真值 ≈$2332),单枚坏账 ≈$2331。
+
+### 核心代码(节选)
+
+```solidity
+// 正确:两段相乘,1e18 归一化兑换率小数位 -> 8 位小数 USD 价
+function getCbEthUsdPrice() external view returns (uint256) {
+    uint256 cbEthPerEth = uint256(cbEthPerEthFeed.latestAnswer()); // 1e18 精度
+    uint256 ethUsd      = uint256(ethUsdFeed.latestAnswer());      // 1e8  精度
+    return (cbEthPerEth * ethUsd) / 1e18;                          // -> 1e8 USD
+}
+
+// BUG:直接把 cbETH/ETH 兑换率(18 位)缩放成 8 位当 USD 价,漏乘 ethUsd
+function getCbEthUsdPrice() external view returns (uint256) {
+    uint256 cbEthPerEth = uint256(cbEthPerEthFeed.latestAnswer()); // 1e18 精度
+    return cbEthPerEth / 1e10; // 漏掉 “* ethUsd / 1e18”,结果 ≈ 1.06e8 当成 $1.06
+}
+```
+
+清算掠夺断言(testLiquidationUnderBuggyOracle):
+
+```solidity
+uint256 repayUsd = 1.06e8;                          // attacker 只付 ≈$1
+uint256 seized = market.liquidate(borrower, attacker, repayUsd);
+require(seized == 1e18, "attacker seized 1 full cbETH");   // 夺走 1 整枚 cbETH
+// 真值 $2332 - 付出 $1.06 = 坏账 ≈$2331/枚;付 $1 量级,夺 $2000+ 量级
+```
+
+### 运行输出(实测 PASS)
+
+```
+Compiling 1 files with Solc 0.8.24
+Solc 0.8.24 finished in 116.31ms
+Compiler run successful!
+
+Ran 3 tests for test/Moonwell.t.sol:MoonwellOracleTest
+[PASS] testHealthyUnderCorrectOracle() (gas: 1140128)
+[PASS] testLiquidationUnderBuggyOracle() (gas: 1069336)
+[PASS] testPriceMisconfigGap() (gas: 747431)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 935.29µs
+```
+
+### 解释
+
+- **`testPriceMisconfigGap`**:同样的 cbETH/ETH 与 ETH/USD 输入,正确公式得 `$2332`,漏配公式只得 `$1.06`,比值断言为 `2200×`。一句话:**漏掉乘法链路的一段(ETH/USD ≈2200),美元价就掉了三个数量级**——一个"无量纲兑换比率"被当成了"美元价"。
+- **`testHealthyUnderCorrectOracle`**(基线对照):正确价下,抵押 1 cbETH(≈$2332)、借 $1000 的头寸是健康的,清算调用 `revert`。证明 bug 是清算掠夺的**唯一**触发因素,而非头寸本身不健康。
+- **`testLiquidationUnderBuggyOracle`**:同一头寸接到漏配预言机后,抵押被错算为 $1.06 < 债务 $1000,被判可清算;attacker 偿还 ≈$1.06 即夺走 1 整枚 cbETH。对应真实事件中清算人以约 $1 代价搬空 cbETH、留下协议坏账的机制。
+- 这同时印证了报告第 6 节的防御建议:任意**量级/边界检查**(cbETH 美元价不可能落在 $1 量级)或**最小价格段数校验**都能在上线前拦下这个 ≈2200× 的错价。
+
 ## 免责声明
 
 本报告基于上述公开来源与可获取信息整理,仅供安全研究与风险教育之用。报告**不指认任何具体个人或团队**对事件负责;对 AI 共同署名等事项仅作如实记录,不作责任归因。本报告**不构成任何法律意见、投资建议或审计结论**。因公开来源未披露可复核的合约地址与交易哈希,相关链上凭证留待后续补录,本报告内不臆造任何地址或哈希。

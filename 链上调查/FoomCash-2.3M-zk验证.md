@@ -141,6 +141,79 @@ gamma2 (γ in G2) == delta2 (δ in G2) == BN254 的 G2 生成元(默认占位值
 
 ---
 
+## PoC 与可复现性说明
+
+为复现根因,我们在 `/tmp/duolasafe-audits/PoC/foom/` 建了一个独立 Foundry 工程,做了一个**演示 verifier 退化原理的最小化模型(非真实 Groth16 配对)**。`forge test -vv` 全部 PASS(5/5)。
+
+### 模型抽象(诚实声明边界)
+
+真实 Groth16 链上校验是 BN254 上的配对乘积等式:
+
+```
+e(A, B) == e(alpha, beta) · e(L, gamma) · e(C, delta)
+```
+
+我们**没有**实现真实 BN254 配对/可信设置仪式,而是在密码学推理 Groth16 soundness 的标准抽象——**指数域 / 离散对数域**——里复现同一代数结构。利用配对的双线性性 `e(g1^a, g2^b) = T^(a·b)`,把群元素 `g^x` 用其指数 `x` 表示、目标群元素用其对数(加性)表示,配对乘积等式即化为指数的加法/乘法等式(在 BN254 标量域阶 r 下取模):
+
+```
+A·B == alpha·beta + L·gamma + C·delta        (mod r)
+```
+
+这个抽象**忠实保留了 soundness 依赖 gamma、delta 在指数上线性无关这一核心**;`-L` 等代数构造与真实曲线群运算(在指数上即模 r 加法/乘法)同构,因此伪造逻辑不是硬编码的 pass,而是真正由 `gamma==delta` 这一条件代数地推导出来。
+
+### γ==δ 为何使校验退化为恒等式(数学推导)
+
+校验右侧的公共输入项与证明项为 `e(L, gamma) · e(C, delta)`,指数域写作 `L·gamma + C·delta`。
+
+- **正确设置(gamma ≠ delta,各自独立随机化):** 攻击者取 `C = -L`(纯代数,凭空构造,无 witness)时,
+  `L·gamma + C·delta = L·gamma − L·delta = L·(gamma − delta) ≠ 0`。
+  该项不归零,等式不退化,伪造证明被拒——soundness 成立。
+
+- **误配(gamma == delta == G2 生成元,Phase 2 漏跑随机化):** 同样取 `C = -L`,
+  `L·gamma + C·delta = L·g + (−L)·g = (L − L)·g = 0`。
+  公共输入项整体抵消。再取 `A = alpha`、`B = beta`,左侧 `A·B = alpha·beta` 恰好与右侧第一项 `alpha·beta` 相等,
+  **校验退化为 `alpha·beta == alpha·beta`,即恒真的 "1=1"**。verifier 对**任意**公共输入(任意 recipient/nullifier)、**无需任何 witness** 都接受 → 奖池可被逐笔放空。
+
+伪代码(配对版,与上式一一对应):
+
+```
+forge(publicInput):
+    L = vk.IC[0] + sum(publicInput_i · vk.IC[i])      # vk_x
+    A = vk.alpha                                       # = α
+    B = vk.beta                                        # = β
+    C = -L                                             # 群取负,无 witness
+    return (A, B, C)
+# 误配时 e(A,B)/[e(α,β)·e(L,γ)·e(C,δ)]
+#       = e(α,β)/[e(α,β)·e(L,γ)·e(-L,γ)]              (因 δ=γ)
+#       = e(α,β)/[e(α,β)·e(L-L,γ)] = e(α,β)/e(α,β) = 1   → 校验通过
+```
+
+### 工程内容与运行方式
+
+- `src/MiniGroth16Verifier.sol` — 指数域 verifier 模型,持有 alpha/beta/gamma/delta/IC,`verify()` 实现上述模 r 等式;顶部有完整边界声明。
+- `test/Forgery.t.sol` — 不 import forge-std,断言全部用 `require`,含 5 个用例:
+  1. `test_RealProof_PassesUnderCorrectVK` — 真证明(依赖 witness 构造)在正确 VK 下通过(基线)。
+  2. `test_RealProof_PassesUnderBrokenVK` — 真证明在误配 VK 下也通过(说明误配并非"恰好拒真")。
+  3. `test_Forgery_PassesUnderBrokenVK`(核心) — 无 witness 伪造证明(A=α,B=β,C=−L)在 `gamma==delta` 下**通过**。
+  4. `test_Forgery_RejectedUnderCorrectVK`(对照) — 同一伪造在 `gamma!=delta` 下**被拒**;此用例是模型诚实性的关键保证:它证明用例 3 的"通过"确实由 `gamma==delta` 引起,而非硬编码。
+  5. `test_Forgery_WorksForArbitraryInputs_Loop` — 对 30 组任意公共输入循环伪造均通过,对应"递增 nullifier、换输入、循环放空"的攻击可重复性。
+
+运行:
+
+```
+export PATH="$HOME/.foundry/bin:$PATH"
+cd /tmp/duolasafe-audits/PoC/foom && forge test -vv
+# 结果:5 passed; 0 failed
+```
+
+### 边界与未覆盖项(诚实标注)
+
+- **这是退化原理的最小化模型,不是真实 Groth16 配对。** 未实现 BN254 双线性配对、未跑真实 snarkjs 可信设置、未对 Foom Cash 链上 verifier 字节码做反编译以核出 γ==δ 的原始曲线坐标(该具体相等关系仍采信第三方反编译结论,见 §2.3 取证说明)。
+- 模型用单个标量折叠公共输入与单一 IC 系数,仅为演示;真实电路有多公共输入与多 IC 点,但不改变 `gamma==delta` 导致退化的结论。
+- 完整端到端 PoC 需真实 Groth16 配对环境(BN254 预编译 + snarkjs 仪式产物),超出本次链上取证范围;本模型在代数层面忠实复现了根因机制。
+
+---
+
 ## 来源
 
 - rekt.news,"The Unfinished Proof"(addresses / tx / 攻击机制): https://rekt.news/the-unfinished-proof

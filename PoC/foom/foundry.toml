@@ -1,0 +1,6 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+# 无外部依赖,不使用 forge-std,断言全部用 require。

